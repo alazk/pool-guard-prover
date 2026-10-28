@@ -1,0 +1,26 @@
+[package]
+name = "pool-guard-register"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sp1-zkvm = "6.10.0"
+pool-guard-types = { path = "../types" }
+alloy-primitives = { version = "1", default-features = false, features = ["tiny-keccak"] }
+alloy-sol-types = { version = "1", default-features = false }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+
+# SP1 precompiles for keccak and secp256k1, so the signature check costs few cycles. Tags are the
+# ones sp1 v6.10.0 ships with; keep them in step with sp1-zkvm above.
+[patch.crates-io]
+tiny-keccak = { git = "https://github.com/sp1-patches/tiny-keccak", tag = "patch-2.0.2-sp1-6.10.0" }
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.10.0" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# its own workspace: the host workspace in sp1/ must never build the guest
+[workspace]

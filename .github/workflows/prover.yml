@@ -1,0 +1,45 @@
+# Builds pg-prover, the SP1 route's host CLI, as a static Linux binary for Vercel's functions
+# (Amazon Linux 2023, glibc 2.34: a binary built on a newer distro will not start there, so this
+# one is musl and depends on nothing). Download the artifact from the run and put it at
+# app/bin/pg-prover; app/scripts/deploy.sh ships it with the functions.
+#
+# Runs on changes under sp1/ and on demand (Actions → prover → Run workflow). About 25 minutes.
+name: prover
+on:
+  push:
+    paths: ['sp1/**', '.github/workflows/prover.yml']
+  workflow_dispatch:
+permissions: { contents: write }
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools protobuf-compiler cmake
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: x86_64-unknown-linux-musl }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: sp1 }
+      - name: Build pg-prover (static)
+        working-directory: sp1
+        # AVX2: the CPU prover is several times faster with it; every GitHub-hosted runner has it
+        env: { CC_x86_64_unknown_linux_musl: musl-gcc, RUSTFLAGS: "-C target-feature=+avx2" }
+        run: cargo build --release -p pg-prover --target x86_64-unknown-linux-musl && strip target/x86_64-unknown-linux-musl/release/pg-prover
+      - name: It runs and agrees on the digest
+        working-directory: sp1
+        run: |
+          B=target/x86_64-unknown-linux-musl/release/pg-prover
+          file "$B"; ldd "$B" 2>&1 | grep -qE "not a dynamic executable|statically linked" || { echo "not static"; exit 1; }
+          D=$("$B" digest --record '{"sheet":"0xabababababababababababababababababababababababababababababababab","hook":"0x1111111111111111111111111111111111111111","wallet":"0x2222222222222222222222222222222222222222","limit":"1000","listed":true,"ts":1}')
+          echo "$D"; echo "$D" | grep -q 0xbb1f6299938c4dce47517f0a363664fc4712e2346dd89bd1eaaee3b5be4ccaf6
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pg-prover-linux-x86_64
+          path: sp1/target/x86_64-unknown-linux-musl/release/pg-prover
+          if-no-files-found: error
+      # the same binary on a rolling release, so proving runs (prove.yml) fetch it in seconds
+      - name: Publish to the pg-prover release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release view pg-prover >/dev/null 2>&1 || gh release create pg-prover --title "pg-prover (rolling)" --notes "The SP1 route's prover CLI, static Linux x86_64. Rebuilt by the prover workflow on every change under sp1/." --latest=false
+          gh release upload pg-prover sp1/target/x86_64-unknown-linux-musl/release/pg-prover --clobber

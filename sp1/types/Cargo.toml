@@ -1,0 +1,10 @@
+[package]
+name = "pool-guard-types"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy-primitives = { workspace = true }

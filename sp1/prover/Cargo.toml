@@ -1,0 +1,27 @@
+[package]
+name = "pg-prover"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pg-prover"
+path = "src/main.rs"
+
+[features]
+# the Groth16 wrap through gnark linked in at build time (needs Go), instead of Succinct's Docker
+# image: what the self-hosted prover builds (script/sp1-runner-setup.sh)
+native-gnark = ["sp1-sdk/native-gnark"]
+
+[dependencies]
+pool-guard-types = { workspace = true }
+sp1-sdk = { version = "6.10.0", features = ["network"] }
+alloy-primitives = { version = "1", features = ["k256"] }
+alloy-sol-types = "1"
+alloy-signer = "1"
+alloy-signer-local = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"

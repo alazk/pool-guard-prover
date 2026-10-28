@@ -1,0 +1,22 @@
+# The SP1 route of Pool Guard: the issuer signs an investor's record, the investor's side proves
+# in SP1 that the signed limit covers the deposit, and the Newton policy checks that proof through
+# the SP1 verifier on Sepolia. Three crates:
+#   types    the record and the public values, shared by the program and the prover
+#   program  the zkVM guest (built with `cargo prove build` under sp1/program)
+#   prover   `pg-prover`, the host CLI the app calls: execute | request | status | vkey
+[workspace]
+resolver = "2"
+members = ["types", "prover"]
+# the program is not a workspace member: `cargo prove build` compiles it for the zkVM target on
+# its own, and the host workspace must never try to build it
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+pool-guard-types = { path = "types" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+alloy-sol-types = { version = "1", default-features = false }
+alloy-primitives = { version = "1", default-features = false, features = ["tiny-keccak"] }

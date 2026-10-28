@@ -1,0 +1,114 @@
+# One SP1 proof per run, made with the open-source prover on a free GitHub-hosted runner
+# (4 cores, 16 GB, Docker). The console's /api/prove starts a run with the issuer's signed record
+# and a request id; the proof lands as proof-<request>.json on the rolling "proofs" release,
+# where /api/proof finds it. See app/src/prover.js (PROVER=actions) and docs/SP1-CUTOVER.md.
+#
+# The SP1 prover's defaults are sized for big machines: 8 recursion provers and 4 core provers
+# at once, each holding its own traces, which on 16 GB swaps until the time limit. Our program
+# is small (a few shards), so this runs one worker of each kind: slower per step, but the whole
+# proof fits in memory. Up to 24 GB of swap, made after clearing the runner's unused toolchains, is the safety net, and the
+# memory line every two minutes shows how close it gets. The circuit artifacts (about 1 GB) are
+# cached between runs once one has finished.
+name: prove
+on:
+  workflow_dispatch:
+    inputs:
+      request:
+        description: the request id (0x + 64 hex), names the result
+        required: true
+      input:
+        description: the prover input, sealed with PROVER_INPUT_KEY (v1.<base64>)
+        required: true
+permissions: { contents: write }
+concurrency: { group: "prove-${{ inputs.request }}", cancel-in-progress: false }
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: "sp1/elf", sparse-checkout-cone-mode: false }
+      # a self-hosted runner may have its own build at PG_PROVER (its .env); otherwise the release
+      - name: The prover CLI
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          if [ -n "${PG_PROVER:-}" ] && [ -x "$PG_PROVER" ]; then echo "using $PG_PROVER"; else
+            gh release download pg-prover --pattern pg-prover --output pg-prover --clobber && chmod +x pg-prover && echo "PG_PROVER=$PWD/pg-prover" >> "$GITHUB_ENV"; fi
+      - name: Already proven?
+        id: have
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          if gh release download proofs --pattern "proof-${{ inputs.request }}.json" --output /dev/null 2>/dev/null; then echo "done=1" >> "$GITHUB_OUTPUT"; echo "a proof for this request is already published"; else echo "done=0" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/cache@v4
+        if: steps.have.outputs.done == '0' && runner.environment == 'github-hosted'
+        with:
+          path: ~/.sp1/circuits
+          key: sp1-circuits-${{ hashFiles('sp1/elf/vkey.json') }}
+      # The runner's disk is mostly preinstalled toolchains this job never uses. Clear them, then
+      # make swap from what is free, keeping 20 GB for the circuit files and the Groth16 image.
+      - name: Disk and swap
+        if: steps.have.outputs.done == '0' && runner.environment == 'github-hosted'
+        run: |
+          df -h / /mnt 2>/dev/null | sed 1d
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft /opt/google /usr/lib/jvm || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          sudo swapoff -a || true; sudo rm -f /mnt/swapfile /swapfile
+          # the swap file goes on whichever of / and /mnt has more room
+          D=/; [ -d /mnt ] && [ "$(df --output=avail -BG /mnt | tail -1 | tr -dc 0-9)" -gt "$(df --output=avail -BG / | tail -1 | tr -dc 0-9)" ] && D=/mnt
+          FREE=$(df --output=avail -BG / | tail -1 | tr -dc 0-9); FREE_D=$(df --output=avail -BG "$D" | tail -1 | tr -dc 0-9)
+          # keep 20 GB free on / (circuits, docker); on a separate /mnt keep 2
+          if [ "$D" = / ]; then SWAP=$(( FREE - 20 )); else SWAP=$(( FREE_D - 2 )); fi
+          [ "$SWAP" -gt 24 ] && SWAP=24
+          if [ "$SWAP" -ge 4 ]; then sudo fallocate -l "${SWAP}G" "$D/swapfile.pg" && sudo chmod 600 "$D/swapfile.pg" && sudo mkswap "$D/swapfile.pg" >/dev/null && sudo swapon "$D/swapfile.pg"; echo "swap ${SWAP} GB on $D"; else echo "not enough disk for swap"; fi
+          df -h / /mnt 2>/dev/null | sed 1d; free -g; nproc
+      - name: Prove
+        if: steps.have.outputs.done == '0'
+        env:
+          SEALED: ${{ inputs.input }}
+          INPUT_KEY: ${{ secrets.PROVER_INPUT_KEY }}
+          SP1_PROVER: cpu
+          RUST_LOG: info
+          # one worker of each kind, one item in flight between stages (see the top of the file)
+          SP1_WORKER_NUM_CORE_WORKERS: "1"
+          SP1_WORKER_CORE_BUFFER_SIZE: "1"
+          SP1_WORKER_NUM_SPLICING_WORKERS: "1"
+          SP1_WORKER_SPLICING_BUFFER_SIZE: "1"
+          SP1_WORKER_NUMBER_OF_SEND_SPLICE_WORKERS_PER_SPLICE: "1"
+          SP1_WORKER_SEND_SPLICE_INPUT_BUFFER_SIZE_PER_SPLICE: "1"
+          SP1_WORKER_NUM_SETUP_WORKERS: "1"
+          SP1_WORKER_SETUP_BUFFER_SIZE: "1"
+          SP1_WORKER_NUM_PREPARE_REDUCE_WORKERS: "1"
+          SP1_WORKER_PREPARE_REDUCE_BUFFER_SIZE: "1"
+          SP1_WORKER_NUM_RECURSION_EXECUTOR_WORKERS: "1"
+          SP1_WORKER_RECURSION_EXECUTOR_BUFFER_SIZE: "1"
+          SP1_WORKER_NUM_RECURSION_PROVER_WORKERS: "1"
+          SP1_WORKER_RECURSION_PROVER_BUFFER_SIZE: "1"
+          SP1_WORKER_NUM_DEFERRED_WORKERS: "1"
+          SP1_WORKER_DEFERRED_BUFFER_SIZE: "1"
+          SP1_WORKER_NUMBER_OF_GAS_EXECUTORS: "1"
+          SP1_WORKER_GAS_EXECUTOR_BUFFER_SIZE: "1"
+        run: |
+          # memory and swap every two minutes, so a slow run shows whether it is computing or swapping
+          ( while sleep 120; do echo "[mem] $(free -m | awk '/^Mem/{printf "used %d of %d MB", $3, $2} /^Swap/{printf ", swap %d MB", $3}'), disk free $(df --output=avail -h / | tail -1 | tr -d ' ')"; done ) &
+          # the input carries the issuer's signed record, limit included: it arrives sealed and is
+          # opened here with the repo's secret, never printed
+          node -e '
+            const c = require("crypto"), [v, b] = String(process.env.SEALED).split(".");
+            if (v !== "v1" || !b) throw new Error("the input is not sealed (v1.<base64>)");
+            const k = Buffer.from(String(process.env.INPUT_KEY).replace(/^0x/, ""), "hex");
+            if (k.length !== 32) throw new Error("the PROVER_INPUT_KEY secret is missing or not 32 bytes of hex");
+            const raw = Buffer.from(b, "base64"), d = c.createDecipheriv("aes-256-gcm", k, raw.subarray(0, 12));
+            d.setAuthTag(raw.subarray(12, 28));
+            require("fs").writeFileSync("input.json", Buffer.concat([d.update(raw.subarray(28)), d.final()]));'
+          [ -s input.json ] || { echo "no input"; exit 1; }
+          [ -f sp1/elf/pool-guard-register ] || { echo "sp1/elf/pool-guard-register is not committed: build the program first"; exit 1; }
+          # the stage log streams line by line; the proof itself goes to the file, not the log
+          set -o pipefail
+          "$PG_PROVER" prove --elf sp1/elf/pool-guard-register --input input.json --out "proof-${{ inputs.request }}.json" | { grep --line-buffered -v '^{"proof"' || true; }
+          [ -s "proof-${{ inputs.request }}.json" ] || { echo "no proof was written"; exit 1; }
+      - name: Publish the proof
+        if: steps.have.outputs.done == '0'
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release view proofs >/dev/null 2>&1 || gh release create proofs --title "proofs (rolling)" --notes "SP1 proofs made by the prove workflow, one JSON per request id. Safe to delete old ones." --latest=false
+          gh release upload proofs "proof-${{ inputs.request }}.json" --clobber
