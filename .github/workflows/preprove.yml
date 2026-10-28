@@ -1,28 +1,31 @@
 # The prover repo's daily preprove (copied to its .github/workflows/ by script/make-prover-repo.sh;
 # kept here so it does not run in this repo).
-# Keeps every proof a visitor can ask for made ahead of time: once a day it runs preprove.mjs
+# Keeps every proof a visitor can ask for made ahead of time: every hour it runs preprove.mjs
 # against the live site, which asks for each wallet's set deposits, its listing and the off-list
-# wallets' deposits. A proof already made is skipped, so a day with nothing new costs a minute.
+# wallets' deposits. A proof already made is skipped, so an hour with nothing new costs a few minutes.
 # A proof is reused for half the policy's freshness window (15 days) and accepted for the whole
-# window (30), so new ones are started within a day of each window opening, well before the old
+# window (30), so new ones are started within an hour of each window opening, well before the old
 # ones expire. Also run it by hand (Actions → preprove → Run workflow) after editing the sheet.
 #
+# Then it resets the demo wallets whose room is used up (preprove.mjs), so they are back to their
+# whole limit within the hour, with the answers already proven.
+#
 # Needs the repo secret CRON_SECRET: the site's own, which lets these requests past its
-# per-visitor rate limit. GitHub pauses scheduled workflows in a repo with no commits for 60 days
-# and emails the owner; re-enable it from the Actions tab.
+# per-visitor rate limit. GitHub pauses scheduled workflows in a repo with no commits for 60 days,
+# so when the last commit is 50 days old this one adds an empty one. A failed run emails the owner.
 name: preprove
 on:
-  schedule: [{ cron: '17 5 * * *' }]
+  schedule: [{ cron: '17 * * * *' }]
   workflow_dispatch:
-permissions: { contents: read }
+permissions: { contents: write }
 concurrency: { group: preprove, cancel-in-progress: false }
 jobs:
   preprove:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-        with: { sparse-checkout: "preprove.mjs", sparse-checkout-cone-mode: false }
+        with: { sparse-checkout: "preprove.mjs", sparse-checkout-cone-mode: false, fetch-depth: 1 }
       - name: Ask the site for every proof
         env:
           SITE_URL: https://newton-pool-guard.vercel.app
@@ -30,3 +33,12 @@ jobs:
         run: |
           [ -n "$CRON_SECRET" ] || { echo "the CRON_SECRET secret is not set on this repo"; exit 1; }
           node preprove.mjs
+      # GitHub pauses a scheduled workflow after 60 days without a commit: keep the repo active
+      - name: Keep the schedule alive
+        if: always() && github.event_name == 'schedule'
+        run: |
+          last=$(git log -1 --format=%ct); age=$(( ($(date +%s) - last) / 86400 ))
+          echo "last commit $age days ago"
+          if [ "$age" -ge 50 ]; then
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit --allow-empty -m "keep the daily preprove scheduled" && git push
+          fi
