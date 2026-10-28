@@ -3,12 +3,14 @@
 # and a request id; the proof lands as proof-<request>.json on the rolling "proofs" release,
 # where /api/proof finds it. See app/src/prover.js (PROVER=actions) and docs/SP1-CUTOVER.md.
 #
-# The SP1 prover's defaults are sized for big machines: 8 recursion provers and 4 core provers
-# at once, each holding its own traces, which on 16 GB swaps until the time limit. Our program
-# is small (a few shards), so this runs one worker of each kind: slower per step, but the whole
-# proof fits in memory. Up to 24 GB of swap, made after clearing the runner's unused toolchains, is the safety net, and the
-# memory line every two minutes shows how close it gets. The circuit artifacts (about 1 GB) are
+# The prover runs with its own defaults: its keys take about 7 GB before proving starts, which fits the 16 GB a public
+# repo's runner has (a private repo's 7 GB runner does not fit them, which is why this runs in a
+# public repo). Cutting its workers and queues to one each stalled it: the stages wait on each
+# other. Up to 24 GB of swap, made after clearing the runner's unused toolchains, is the safety
+# net. The program is executed once first (seconds), and every two minutes the log shows memory,
+# swap and the busiest processes, so a stall is visible. The circuit artifacts (about 1 GB) are
 # cached between runs once one has finished.
+
 name: prove
 on:
   workflow_dispatch:
@@ -68,28 +70,9 @@ jobs:
           INPUT_KEY: ${{ secrets.PROVER_INPUT_KEY }}
           SP1_PROVER: cpu
           RUST_LOG: info
-          # one worker of each kind, one item in flight between stages (see the top of the file)
-          SP1_WORKER_NUM_CORE_WORKERS: "1"
-          SP1_WORKER_CORE_BUFFER_SIZE: "1"
-          SP1_WORKER_NUM_SPLICING_WORKERS: "1"
-          SP1_WORKER_SPLICING_BUFFER_SIZE: "1"
-          SP1_WORKER_NUMBER_OF_SEND_SPLICE_WORKERS_PER_SPLICE: "1"
-          SP1_WORKER_SEND_SPLICE_INPUT_BUFFER_SIZE_PER_SPLICE: "1"
-          SP1_WORKER_NUM_SETUP_WORKERS: "1"
-          SP1_WORKER_SETUP_BUFFER_SIZE: "1"
-          SP1_WORKER_NUM_PREPARE_REDUCE_WORKERS: "1"
-          SP1_WORKER_PREPARE_REDUCE_BUFFER_SIZE: "1"
-          SP1_WORKER_NUM_RECURSION_EXECUTOR_WORKERS: "1"
-          SP1_WORKER_RECURSION_EXECUTOR_BUFFER_SIZE: "1"
-          SP1_WORKER_NUM_RECURSION_PROVER_WORKERS: "1"
-          SP1_WORKER_RECURSION_PROVER_BUFFER_SIZE: "1"
-          SP1_WORKER_NUM_DEFERRED_WORKERS: "1"
-          SP1_WORKER_DEFERRED_BUFFER_SIZE: "1"
-          SP1_WORKER_NUMBER_OF_GAS_EXECUTORS: "1"
-          SP1_WORKER_GAS_EXECUTOR_BUFFER_SIZE: "1"
         run: |
           # memory and swap every two minutes, so a slow run shows whether it is computing or swapping
-          ( while sleep 120; do echo "[mem] $(free -m | awk '/^Mem/{printf "used %d of %d MB", $3, $2} /^Swap/{printf ", swap %d MB", $3}'), disk free $(df --output=avail -h / | tail -1 | tr -d ' ')"; done ) &
+          ( while sleep 120; do echo "[mem] $(free -m | awk '/^Mem/{printf "used %d of %d MB", $3, $2} /^Swap/{printf ", swap %d MB", $3}'), disk free $(df --output=avail -h / | tail -1 | tr -d ' '); cpu: $(ps -eo pcpu=,comm= --sort=-pcpu | head -3 | awk '{printf "%s %s%%  ", substr($2,1,24), $1}')"; done ) &
           # the input carries the issuer's signed record, limit included: it arrives sealed and is
           # opened here with the repo's secret, never printed
           node -e '
@@ -102,6 +85,8 @@ jobs:
             require("fs").writeFileSync("input.json", Buffer.concat([d.update(raw.subarray(28)), d.final()]));'
           [ -s input.json ] || { echo "no input"; exit 1; }
           [ -f sp1/elf/pool-guard-register ] || { echo "sp1/elf/pool-guard-register is not committed: build the program first"; exit 1; }
+          # the program first, without a proof: seconds, and it shows the input is one it accepts
+          timeout 600 "$PG_PROVER" execute --elf sp1/elf/pool-guard-register --input input.json | tail -1 | cut -c1-400
           # the stage log streams line by line; the proof itself goes to the file, not the log
           set -o pipefail
           "$PG_PROVER" prove --elf sp1/elf/pool-guard-register --input input.json --out "proof-${{ inputs.request }}.json" | { grep --line-buffered -v '^{"proof"' || true; }
