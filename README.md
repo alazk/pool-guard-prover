@@ -13,7 +13,8 @@ Sepolia before they authorize the deposit. The limit itself never leaves the pro
 - `.github/workflows/prove.yml`: one Groth16 proof per run on a hosted runner. The console starts
   a run with the request sealed under the repo's `PROVER_INPUT_KEY` secret, and the proof lands
   on the rolling `proofs` release.
-- `.github/workflows/prover.yml`: builds `pg-prover` as a static Linux binary on the rolling
-  `pg-prover` release.
+- `.github/workflows/prover.yml`: builds `pg-prover` on the rolling `pg-prover` release.
+- `.github/workflows/preprove.yml` and `preprove.mjs`: once a day, asks the live site for every
+  proof a visitor can pick, so they are made ahead of time (made ones are skipped).
 
 Generated from the main Pool Guard repo by `script/make-prover-repo.sh`; change it there.

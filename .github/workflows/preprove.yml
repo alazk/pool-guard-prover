@@ -1,0 +1,32 @@
+# The prover repo's daily preprove (copied to its .github/workflows/ by script/make-prover-repo.sh;
+# kept here so it does not run in this repo).
+# Keeps every proof a visitor can ask for made ahead of time: once a day it runs preprove.mjs
+# against the live site, which asks for each wallet's set deposits, its listing and the off-list
+# wallets' deposits. A proof already made is skipped, so a day with nothing new costs a minute.
+# A proof is reused for half the policy's freshness window (15 days) and accepted for the whole
+# window (30), so new ones are started within a day of each window opening, well before the old
+# ones expire. Also run it by hand (Actions → preprove → Run workflow) after editing the sheet.
+#
+# Needs the repo secret CRON_SECRET: the site's own, which lets these requests past its
+# per-visitor rate limit. GitHub pauses scheduled workflows in a repo with no commits for 60 days
+# and emails the owner; re-enable it from the Actions tab.
+name: preprove
+on:
+  schedule: [{ cron: '17 5 * * *' }]
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency: { group: preprove, cancel-in-progress: false }
+jobs:
+  preprove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: "preprove.mjs", sparse-checkout-cone-mode: false }
+      - name: Ask the site for every proof
+        env:
+          SITE_URL: https://newton-pool-guard.vercel.app
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          [ -n "$CRON_SECRET" ] || { echo "the CRON_SECRET secret is not set on this repo"; exit 1; }
+          node preprove.mjs
