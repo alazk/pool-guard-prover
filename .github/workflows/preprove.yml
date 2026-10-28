@@ -1,11 +1,12 @@
-# The prover repo's daily preprove (copied to its .github/workflows/ by script/make-prover-repo.sh;
+# The prover repo's hourly preprove (copied to its .github/workflows/ by script/make-prover-repo.sh;
 # kept here so it does not run in this repo).
 # Keeps every proof a visitor can ask for made ahead of time: every hour it runs preprove.mjs
 # against the live site, which asks for each wallet's set deposits, its listing and the off-list
 # wallets' deposits. A proof already made is skipped, so an hour with nothing new costs a few minutes.
-# A proof is reused for half the policy's freshness window (15 days) and accepted for the whole
-# window (30), so new ones are started within an hour of each window opening, well before the old
-# ones expire. Also run it by hand (Actions → preprove → Run workflow) after editing the sheet.
+# A proof is reused for a day (half the policy's two-day freshness window) and accepted for two,
+# so each day's are started within an hour of the day opening (00:00 UTC), while the console
+# serves the day before's in the meantime. On the free 4-core runners, 20 at a time, remaking
+# every proof takes a few hours of each day. Also run it by hand (Actions → preprove → Run workflow) after editing the sheet.
 #
 # Then it resets the demo wallets whose room is used up (preprove.mjs), so they are back to their
 # whole limit within the hour, with the answers already proven.
@@ -33,6 +34,17 @@ jobs:
         run: |
           [ -n "$CRON_SECRET" ] || { echo "the CRON_SECRET secret is not set on this repo"; exit 1; }
           node preprove.mjs
+      # proofs older than the policy's window (two days) can no longer be used: delete them, so the
+      # release stays well under GitHub's 1,000 files
+      - name: Clear expired proofs
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          rid=$(gh api "repos/${{ github.repository }}/releases/tags/proofs" --jq .id 2>/dev/null) || { echo "no proofs release yet"; exit 0; }
+          cutoff=$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh api --paginate "repos/${{ github.repository }}/releases/$rid/assets?per_page=100" --jq ".[] | select(.created_at < \"$cutoff\") | .id" > old.txt
+          echo "$(wc -l < old.txt) proofs older than three days"
+          while read -r id; do gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$id" >/dev/null || true; done < old.txt
       # GitHub pauses a scheduled workflow after 60 days without a commit: keep the repo active
       - name: Keep the schedule alive
         if: always() && github.event_name == 'schedule'

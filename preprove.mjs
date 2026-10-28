@@ -48,7 +48,7 @@ async function reset(body) {
   if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
   return j;
 }
-let resetFailed = 0;
+let resetFailed = 0, resetCount = 0;
 if (process.env.RESET !== '0' && SECRET) {
   const { wallets } = await reset({ reset: 'plan' });
   console.log(wallets.length ? `${wallets.length} demo wallets have used their room; resetting them` : 'no demo wallet needs a reset');
@@ -71,7 +71,12 @@ if (process.env.RESET !== '0' && SECRET) {
         if (!w.hashes.length) await reset({ reset: w.id, recount: true });
       } catch (e) { resetFailed++; console.log(`  ${w.id} recount: ${e.message}`); }
     }
+    resetCount = done.length;
     console.log(`reset ${done.length} wallets`);
   }
 }
+// one line to read at a glance, also on the run's summary page when this runs in Actions
+const status = `${made}/${plan.items.length} proofs ready${started ? `, ${started} being made` : ''}${failed ? `, ${failed} failed` : ''}; ${resetCount} wallets reset${resetFailed ? `, ${resetFailed} reset steps failed` : ''}`;
+console.log(`STATUS ${status}`);
+if (process.env.GITHUB_STEP_SUMMARY) { try { fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `**Pool Guard proofs:** ${status}\n`); } catch {} }
 process.exit(failed || resetFailed ? 1 : 0);

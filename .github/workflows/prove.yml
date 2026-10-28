@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { sparse-checkout: "sp1/elf", sparse-checkout-cone-mode: false }
-      # a self-hosted runner may have its own build at PG_PROVER (its .env); otherwise the release
+      # PG_PROVER set on the runner wins; otherwise the glibc build from the pg-prover release
       - name: The prover CLI
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
@@ -85,12 +85,55 @@ jobs:
             require("fs").writeFileSync("input.json", Buffer.concat([d.update(raw.subarray(28)), d.final()]));'
           [ -s input.json ] || { echo "no input"; exit 1; }
           [ -f sp1/elf/pool-guard-register ] || { echo "sp1/elf/pool-guard-register is not committed: build the program first"; exit 1; }
-          # the program first, without a proof: seconds, and it shows the input is one it accepts
-          timeout 600 "$PG_PROVER" execute --elf sp1/elf/pool-guard-register --input input.json | tail -1 | cut -c1-400
-          # the stage log streams line by line; the proof itself goes to the file, not the log
+          # the program first, without a proof: seconds, and its public values are what the proof commits
+          timeout 600 "$PG_PROVER" execute --elf sp1/elf/pool-guard-register --input input.json > exec.json
+          tail -1 exec.json | cut -c1-300; echo
+          PV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("exec.json","utf8").trim().split("\n").pop()).publicValues)')
+          VK=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("sp1/elf/vkey.json","utf8")).vkey)')
+          OUT="proof-${{ inputs.request }}.json"
           set -o pipefail
-          "$PG_PROVER" prove --elf sp1/elf/pool-guard-register --input input.json --out "proof-${{ inputs.request }}.json" | { grep --line-buffered -v '^{"proof"' || true; }
-          [ -s "proof-${{ inputs.request }}.json" ] || { echo "no proof was written"; exit 1; }
+          # the stage log streams line by line; the proof JSON goes to the file, not the log
+          quiet() { grep --line-buffered -v '"proof":"0x' || true; }
+
+          # 1. The split. pg-prover runs every stage up to the Groth16 wrap, then hands gnark a
+          #    witness through docker. A stand-in for docker keeps that witness and ends pg-prover,
+          #    so gnark then runs with the runner's memory to itself instead of beside 10 GB of
+          #    prover state in swap; pg-prover finish assembles the proof and checks it with
+          #    Succinct's verifier. One recursion worker per core keeps the earlier stages in memory.
+          mkdir -p shim split
+          cat > shim/docker <<'SH'
+          #!/usr/bin/env bash
+          if [ "$1" = run ] && printf '%s\n' "$@" | grep -qx prove; then
+            prev= circuit= witness=
+            for a in "$@"; do
+              if [ "$prev" = -v ]; then case "$a" in *:/circuit) circuit="${a%:/circuit}" ;; *:/witness) witness="${a%:/witness}" ;; esac; fi
+              prev="$a"
+            done
+            image=$(printf '%s\n' "$@" | grep -x -B1 prove | head -1)
+            cp "$witness" "$PG_SPLIT_DIR/witness.json" && printf '%s' "$circuit" > "$PG_SPLIT_DIR/circuit" && printf '%s' "$image" > "$PG_SPLIT_DIR/image"
+            echo "[split] the wrap is done; gnark gets its own run" >&2
+            kill -9 "$PPID"; exit 1
+          fi
+          exec /usr/bin/docker "$@"
+          SH
+          sed -i 's/^          //' shim/docker; chmod +x shim/docker
+          if PATH="$PWD/shim:$PATH" PG_SPLIT_DIR="$PWD/split" SP1_WORKER_NUM_RECURSION_PROVER_WORKERS=4 SP1_WORKER_RECURSION_PROVER_BUFFER_SIZE=4 \
+             timeout 3000 "$PG_PROVER" prove --elf sp1/elf/pool-guard-register --input input.json --out "$OUT" | quiet; then :; fi
+          if ! [ -s "$OUT" ] && [ -s split/witness.json ] && [ -s split/image ]; then
+            : > split/gnark.out
+            echo "[split] gnark: $(date -u +%H:%M:%S)"
+            if docker run --rm -v "$(cat split/circuit)":/circuit -v "$PWD/split/witness.json":/witness -v "$PWD/split/gnark.out":/output "$(cat split/image)" prove --system groth16 /circuit /witness /output; then
+              "$PG_PROVER" finish --gnark split/gnark.out --circuit "$(cat split/circuit)" --public-values "$PV" --vkey "$VK" --out "$OUT" > /dev/null \
+                && echo "[split] proof made and verified: $(date -u +%H:%M:%S)" || rm -f "$OUT"
+            fi
+          fi
+
+          # 2. The fallback: the whole proof in one run, with the prover's own settings, as before
+          if ! [ -s "$OUT" ]; then
+            echo "the split did not make a proof; proving in one run"
+            "$PG_PROVER" prove --elf sp1/elf/pool-guard-register --input input.json --out "$OUT" | quiet
+          fi
+          [ -s "$OUT" ] || { echo "no proof was written"; exit 1; }
       - name: Publish the proof
         if: steps.have.outputs.done == '0'
         env: { GH_TOKEN: "${{ github.token }}" }

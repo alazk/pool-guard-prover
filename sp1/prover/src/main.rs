@@ -13,6 +13,10 @@
 //!       { "proof": "0x…", "publicValues": "0x…", "vkey", "decoded" }  a Groth16 proof made here, on
 //!       the CPU; the wrap runs in Succinct's Docker image (16 GB RAM). This is what the GitHub
 //!       Actions prover runs (.github/workflows/prove.yml).
+//!   pg-prover finish --gnark <file> --circuit <dir> --public-values <hex> --vkey <hex> [--out <path>]
+//!       the same JSON as prove, from a Groth16 proof gnark made in its own run (the prove
+//!       workflow stops pg-prover when it hands the wrap to gnark, so gnark has the memory to
+//!       itself); checked with sp1-verifier against the circuit's verifying key first
 //!   pg-prover request --elf <path> --input <json>
 //!       { "requestId": "0x…" }                 asks the Succinct network for a Groth16 proof
 //!   pg-prover status  --request <id>
@@ -128,6 +132,23 @@ async fn run() -> Result<()> {
             if let Ok(path) = arg(&args, "--out") { fs::write(&path, serde_json::to_string(&out_json)?).with_context(|| format!("writing {path}"))?; }
             out(&out_json);
         }
+        "finish" => {
+            let raw = fs::read(arg(&args, "--gnark")?).context("reading gnark's output")?;
+            let proof = match bincode::deserialize::<sp1_verifier::ProofBn254>(&raw).context("gnark's output is not a proof")? {
+                sp1_verifier::ProofBn254::Groth16(p) => p,
+                _ => bail!("gnark's output is not a Groth16 proof"),
+            };
+            let circuit = PathBuf::from(arg(&args, "--circuit")?);
+            let gvk = fs::read(circuit.join("groth16_vk.bin")).context("reading the circuit's groth16_vk.bin")?;
+            let gvk_hash: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(&gvk).into();
+            let bytes = [gvk_hash[..4].to_vec(), hex::decode(&proof.encoded_proof).context("encoded proof is not hex")?].concat();
+            let pv = hexbytes(&arg(&args, "--public-values")?, "public values")?;
+            let vkey = arg(&args, "--vkey")?;
+            sp1_verifier::Groth16Verifier::verify(&bytes, &pv, &vkey, &gvk).map_err(|e| anyhow!("the proof gnark made does not verify: {e}"))?;
+            let out_json = serde_json::json!({ "proof": format!("0x{}", hex::encode(&bytes)), "publicValues": format!("0x{}", hex::encode(&pv)), "decoded": decode(&pv)?, "vkey": vkey, "split": true });
+            if let Ok(path) = arg(&args, "--out") { fs::write(&path, serde_json::to_string(&out_json)?).with_context(|| format!("writing {path}"))?; }
+            out(&out_json);
+        }
         "request" => {
             let i = input(&arg(&args, "--input")?)?;
             let client = ProverClient::builder().network().build().await;
@@ -154,7 +175,7 @@ async fn run() -> Result<()> {
             let key = hexbytes(&arg(&args, "--pubkey")?, "pubkey")?;
             out(&serde_json::json!({ "address": Address::from_slice(&keccak256(&key[1..])[12..]).to_string() }));
         }
-        _ => bail!("usage: pg-prover vkey|sign|digest|execute|prove|request|status …"),
+        _ => bail!("usage: pg-prover vkey|sign|digest|execute|prove|finish|request|status …"),
     }
     Ok(())
 }

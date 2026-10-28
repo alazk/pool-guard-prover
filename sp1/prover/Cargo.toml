@@ -25,3 +25,7 @@ serde_json = "1"
 hex = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow = "1"
+# finish: the Groth16 proof from gnark's output, checked offline before it is published
+sp1-verifier = "6.10.0"
+bincode = "1"
+sha2 = "0.10"
