@@ -35,7 +35,7 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           if [ -n "${PG_PROVER:-}" ] && [ -x "$PG_PROVER" ]; then echo "using $PG_PROVER"; else
-            gh release download pg-prover --pattern pg-prover --output pg-prover --clobber && chmod +x pg-prover && echo "PG_PROVER=$PWD/pg-prover" >> "$GITHUB_ENV"; fi
+            gh release download pg-prover --pattern pg-prover-gnu --output pg-prover --clobber && chmod +x pg-prover && echo "PG_PROVER=$PWD/pg-prover" >> "$GITHUB_ENV"; fi
       - name: Already proven?
         id: have
         env: { GH_TOKEN: "${{ github.token }}" }

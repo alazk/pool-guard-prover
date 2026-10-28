@@ -32,14 +32,34 @@ jobs:
           file "$B"; ldd "$B" 2>&1 | grep -qE "not a dynamic executable|statically linked" || { echo "not static"; exit 1; }
           D=$("$B" digest --record '{"sheet":"0xabababababababababababababababababababababababababababababababab","hook":"0x1111111111111111111111111111111111111111","wallet":"0x2222222222222222222222222222222222222222","limit":"1000","listed":true,"ts":1}')
           echo "$D"; echo "$D" | grep -q 0xbb1f6299938c4dce47517f0a363664fc4712e2346dd89bd1eaaee3b5be4ccaf6
+      # an ordinary glibc build too, for the prove workflow on the runner: SP1 runs the program in
+      # a helper process it talks to through shared memory, and from the static binary above that
+      # helper never answered (the run sat idle); from this build it does
+      - name: Build pg-prover (glibc, for the prove workflow)
+        working-directory: sp1
+        env: { RUSTFLAGS: "-C target-feature=+avx2" }
+        run: |
+          cargo build --release -p pg-prover && strip target/release/pg-prover && cp target/release/pg-prover target/pg-prover-gnu
+          D=$(target/pg-prover-gnu digest --record '{"sheet":"0xabababababababababababababababababababababababababababababababab","hook":"0x1111111111111111111111111111111111111111","wallet":"0x2222222222222222222222222222222222222222","limit":"1000","listed":true,"ts":1}')
+          echo "$D" | grep -q 0xbb1f6299938c4dce47517f0a363664fc4712e2346dd89bd1eaaee3b5be4ccaf6 || { echo "the glibc build disagrees on the digest: $D"; exit 1; }
+          # and it executes the program, in seconds, through that helper
+          if [ -f elf/pool-guard-register ]; then
+            K=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+            R='{"sheet":"0xabababababababababababababababababababababababababababababababab","hook":"0x1111111111111111111111111111111111111111","wallet":"0x2222222222222222222222222222222222222222","limit":"1000","listed":true,"ts":1}'
+            SIG=$(target/pg-prover-gnu sign --key $K --record "$R" | jq -r .signature)
+            echo "{\"record\":$R,\"signature\":\"$SIG\",\"covered\":\"10\"}" > /tmp/in.json
+            timeout 120 target/pg-prover-gnu execute --elf elf/pool-guard-register --input /tmp/in.json | tail -1 | jq -c '.decoded | {listed, fits}'
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: pg-prover-linux-x86_64
-          path: sp1/target/x86_64-unknown-linux-musl/release/pg-prover
+          path: |
+            sp1/target/x86_64-unknown-linux-musl/release/pg-prover
+            sp1/target/pg-prover-gnu
           if-no-files-found: error
       # the same binary on a rolling release, so proving runs (prove.yml) fetch it in seconds
       - name: Publish to the pg-prover release
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          gh release view pg-prover >/dev/null 2>&1 || gh release create pg-prover --title "pg-prover (rolling)" --notes "The SP1 route's prover CLI, static Linux x86_64. Rebuilt by the prover workflow on every change under sp1/." --latest=false
-          gh release upload pg-prover sp1/target/x86_64-unknown-linux-musl/release/pg-prover --clobber
+          gh release view pg-prover >/dev/null 2>&1 || gh release create pg-prover --title "pg-prover (rolling)" --notes "The SP1 route's prover CLI for Linux x86_64: pg-prover is static (for Vercel), pg-prover-gnu is the glibc build the prove workflow runs. Rebuilt by the prover workflow on every change under sp1/." --latest=false
+          gh release upload pg-prover sp1/target/x86_64-unknown-linux-musl/release/pg-prover sp1/target/pg-prover-gnu --clobber

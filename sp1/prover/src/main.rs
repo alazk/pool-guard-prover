@@ -111,7 +111,8 @@ async fn run() -> Result<()> {
         }
         "execute" => {
             let i = input(&arg(&args, "--input")?)?;
-            let client = ProverClient::builder().cpu().build().await;
+            // the light client only executes: no proving keys, so seconds and little memory
+            let client = ProverClient::builder().light().build().await;
             let (pv, report) = client.execute(elf(&PathBuf::from(arg(&args, "--elf")?))?, stdin_for(&i)).await?;
             let bytes = pv.to_vec();
             out(&serde_json::json!({ "publicValues": format!("0x{}", hex::encode(&bytes)), "decoded": decode(&bytes)?, "cycles": report.total_instruction_count() }));
